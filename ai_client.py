@@ -1,16 +1,17 @@
 import logging
 import time
+import requests
+import json
 from typing import Dict, List, Optional, Any
-from openai import OpenAI
 from config import config
 
 class AIClient:
-    """Modern OpenAI client with OpenRouter support"""
+    """Google Gemini AI client using REST API"""
     
     def __init__(self):
         self.api_key = config.api_key
-        self.base_url = config.get('api.base_url')
         self.model = config.get('api.model')
+        self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
 
         # Debug API key
         if self.api_key:
@@ -20,16 +21,6 @@ class AIClient:
 
         if not config.validate_api_key():
             raise ValueError("Invalid or missing API key")
-        
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout=30.0,  # Set explicit timeout
-            default_headers={
-                "HTTP-Referer": "https://github.com/your-repo",  # Optional
-                "X-Title": "AI Assistant",  # Optional
-            }
-        )
         
         logging.info(f"AI Client initialized with model: {self.model}")
     
@@ -46,18 +37,42 @@ class AIClient:
             try:
                 logging.info(f"Attempting to generate code (attempt {attempt + 1}/{max_retries})")
                 
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": command}
-                    ],
-                    temperature=0.1,
-                    max_tokens=2000,
-                    timeout=25.0  # Shorter timeout per request
+                # Combine system prompt and user command for Gemini
+                full_prompt = f"{system_prompt}\n\nUser command: {command}"
+                
+                # Generate content using Gemini REST API
+                payload = {
+                    "contents": [{
+                        "parts": [{
+                            "text": full_prompt
+                        }]
+                    }],
+                    "generationConfig": {
+                        "temperature": 0.1,
+                        "maxOutputTokens": 2000,
+                    }
+                }
+                
+                headers = {
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": self.api_key
+                }
+                
+                api_response = requests.post(
+                    self.api_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=30
                 )
                 
-                code = response.choices[0].message.content.strip()
+                api_response.raise_for_status()
+                response_data = api_response.json()
+                
+                # Extract text from response
+                if "candidates" in response_data and len(response_data["candidates"]) > 0:
+                    code = response_data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                else:
+                    raise ValueError("No content in API response")
                 
                 # Clean up code formatting
                 code = self._clean_code(code)
@@ -65,7 +80,42 @@ class AIClient:
                 logging.info(f"Generated code for command: {command[:50]}...")
                 return code
                 
+            except requests.exceptions.HTTPError as e:
+                status_code = e.response.status_code if hasattr(e, 'response') else None
+                error_str = str(e)
+                
+                # Check for authentication errors
+                if status_code == 401 or "401" in error_str or "Unauthorized" in error_str or "API_KEY_INVALID" in error_str or "API key not valid" in error_str:
+                    logging.error(f"Authentication error (attempt {attempt + 1}): {e}")
+                    logging.error("Please check your GEMINI_API_KEY in .env file")
+                    # Don't retry on auth errors, go straight to fallback
+                    logging.warning("Authentication failed, trying fallback method")
+                    return self._generate_fallback_code(command, context)
+                
+                # Check for quota/rate limit errors
+                if status_code == 429 or "429" in error_str or "quota" in error_str.lower() or "rate limit" in error_str.lower():
+                    logging.error(f"Quota/Rate limit error (attempt {attempt + 1}): {e}")
+                    logging.warning("Quota exceeded, trying fallback method")
+                    return self._generate_fallback_code(command, context)
+                
+                # Check for bad request (400) - might be model name issue
+                if status_code == 400:
+                    error_detail = ""
+                    try:
+                        if hasattr(e, 'response') and e.response:
+                            error_detail = e.response.text
+                    except:
+                        pass
+                    logging.error(f"Bad request error (attempt {attempt + 1}): {e}")
+                    logging.error(f"Error details: {error_detail}")
+                    # Don't retry on bad requests, likely configuration issue
+                    logging.warning("Bad request, trying fallback method")
+                    return self._generate_fallback_code(command, context)
+                
+                logging.error(f"HTTP error generating code (attempt {attempt + 1}): {e}")
+                
             except Exception as e:
+                error_str = str(e)
                 logging.error(f"Error generating code (attempt {attempt + 1}): {e}")
                 
                 if attempt < max_retries - 1:
@@ -82,6 +132,89 @@ class AIClient:
         try:
             # Try to match against known function patterns
             command_lower = command.lower()
+            import re
+            
+            # Handle common commands directly (before trying function matching)
+            # Folder/directory creation commands
+            if 'create' in command_lower and ('folder' in command_lower or 'directory' in command_lower):
+                # Extract folder name and path
+                folder_match = re.search(r'(?:named|name|called)\s+(\w+)', command_lower)
+                drive_match = re.search(r'\b([a-z]):\s*drive', command_lower)
+                
+                if folder_match:
+                    folder_name = folder_match.group(1)
+                    if drive_match:
+                        drive = drive_match.group(1).upper()
+                        folder_path = f"{drive}:\\{folder_name}"
+                    else:
+                        # Default to D drive if mentioned, otherwise current directory
+                        if 'd drive' in command_lower or 'd:' in command_lower:
+                            folder_path = f"D:\\{folder_name}"
+                        else:
+                            folder_path = folder_name
+                    
+                    return f"""# Create folder: {folder_path}
+import os
+try:
+    os.makedirs(r'{folder_path}', exist_ok=True)
+    if os.path.exists(r'{folder_path}'):
+        print(f'✅ Folder created successfully: {folder_path}')
+    else:
+        print(f'❌ Failed to create folder: {folder_path}')
+except Exception as e:
+    print(f'Error creating folder: {{e}}')"""
+            
+            # Brightness commands
+            if 'brightness' in command_lower:
+                if 'maximum' in command_lower or 'max' in command_lower or 'full' in command_lower:
+                    return """# Set brightness to maximum
+import screen_brightness_control as sbc
+try:
+    sbc.set_brightness(100)
+    print('Brightness set to maximum (100%)')
+except Exception as e:
+    print(f'Error setting brightness: {e}')"""
+                elif 'minimum' in command_lower or 'min' in command_lower:
+                    return """# Set brightness to minimum
+import screen_brightness_control as sbc
+try:
+    sbc.set_brightness(0)
+    print('Brightness set to minimum (0%)')
+except Exception as e:
+    print(f'Error setting brightness: {e}')"""
+                elif 'increase' in command_lower or 'up' in command_lower:
+                    return """# Increase brightness
+import screen_brightness_control as sbc
+try:
+    current = sbc.get_brightness()[0] if isinstance(sbc.get_brightness(), list) else sbc.get_brightness()
+    new_level = min(100, current + 10)
+    sbc.set_brightness(new_level)
+    print(f'Brightness increased to {new_level}%')
+except Exception as e:
+    print(f'Error increasing brightness: {e}')"""
+                elif 'decrease' in command_lower or 'down' in command_lower or 'reduce' in command_lower:
+                    return """# Decrease brightness
+import screen_brightness_control as sbc
+try:
+    current = sbc.get_brightness()[0] if isinstance(sbc.get_brightness(), list) else sbc.get_brightness()
+    new_level = max(0, current - 10)
+    sbc.set_brightness(new_level)
+    print(f'Brightness decreased to {new_level}%')
+except Exception as e:
+    print(f'Error decreasing brightness: {e}')"""
+                else:
+                    # Extract number from command
+                    numbers = re.findall(r'\d+', command)
+                    if numbers:
+                        level = int(numbers[0])
+                        level = max(0, min(100, level))  # Clamp between 0-100
+                        return f"""# Set brightness to {level}%
+import screen_brightness_control as sbc
+try:
+    sbc.set_brightness({level})
+    print(f'Brightness set to {level}%')
+except Exception as e:
+    print(f'Error setting brightness: {{e}}')"""
             
             # Import the function mapping to check for direct matches
             try:
@@ -93,9 +226,13 @@ class AIClient:
                     # Try to call the function directly
                     if callable(func):
                         try:
-                            result = func()
-                            return f"# Direct function call for: {command}\nresult = {func.__name__}()\nprint(f'Result: {{result}}')"
-                        except:
+                            # Get function name safely
+                            func_name = getattr(func, '__name__', None)
+                            if func_name and func_name != '<lambda>':
+                                # Test if function can be called (but don't actually call it, just generate code)
+                                return f"# Direct function call for: {command}\nresult = {func_name}()\nprint(f'Result: {{result}}')"
+                        except Exception as e:
+                            logging.warning(f"Could not generate code for function: {e}")
                             pass
                 
                 # Check if it's a known system command
@@ -142,14 +279,37 @@ Respond ONLY with the complete function code, no explanations or markdown format
 """
         
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=1500
+            payload = {
+                "contents": [{
+                    "parts": [{
+                        "text": prompt
+                    }]
+                }],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "maxOutputTokens": 1500,
+                }
+            }
+            
+            headers = {
+                "Content-Type": "application/json",
+                "x-goog-api-key": self.api_key
+            }
+            
+            api_response = requests.post(
+                self.api_url,
+                headers=headers,
+                json=payload,
+                timeout=30
             )
             
-            function_code = response.choices[0].message.content.strip()
+            api_response.raise_for_status()
+            response_data = api_response.json()
+            
+            if "candidates" in response_data and len(response_data["candidates"]) > 0:
+                function_code = response_data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            else:
+                raise ValueError("No content in API response")
             function_code = self._clean_code(function_code)
             
             logging.info(f"Generated function for task: {task_description[:50]}...")
@@ -182,15 +342,39 @@ Respond ONLY with valid JSON, no explanations.
 """
         
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=500
+            payload = {
+                "contents": [{
+                    "parts": [{
+                        "text": prompt
+                    }]
+                }],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": 500,
+                }
+            }
+            
+            headers = {
+                "Content-Type": "application/json",
+                "x-goog-api-key": self.api_key
+            }
+            
+            api_response = requests.post(
+                self.api_url,
+                headers=headers,
+                json=payload,
+                timeout=30
             )
             
+            api_response.raise_for_status()
+            response_data = api_response.json()
+            
+            if "candidates" in response_data and len(response_data["candidates"]) > 0:
+                content = response_data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            else:
+                raise ValueError("No content in API response")
+            
             import json
-            content = response.choices[0].message.content.strip()
 
             # Try to extract JSON from the response
             if "```json" in content:
@@ -206,7 +390,12 @@ Respond ONLY with valid JSON, no explanations.
 
         except Exception as e:
             logging.error(f"Error analyzing error: {e}")
-            logging.error(f"Response content: {response.choices[0].message.content}")
+            # Check if response was created before logging it
+            try:
+                if 'response' in locals() and hasattr(response, 'text'):
+                    logging.error(f"Response content: {response.text}")
+            except:
+                pass
             # Default to attempting improvement for capability gaps
             return {
                 "error_type": "missing_capability",

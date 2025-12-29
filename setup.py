@@ -33,21 +33,21 @@ def setup_environment():
     print("=" * 30)
     
     # Check for API key
-    api_key = os.getenv('OPENROUTER_API_KEY') or os.getenv('OPENAI_API_KEY')
+    api_key = os.getenv('GEMINI_API_KEY') or os.getenv('OPENROUTER_API_KEY') or os.getenv('OPENAI_API_KEY')
     
     if not api_key:
         print("⚠️  No API key found in environment variables")
         print("\nTo use this assistant, you need to set up an API key:")
-        print("1. Get an API key from OpenRouter (https://openrouter.ai/)")
+        print("1. Get an API key from Google AI Studio (https://aistudio.google.com/app/apikey)")
         print("2. Set the environment variable:")
-        print("   Windows: set OPENROUTER_API_KEY=your_key_here")
-        print("   Linux/Mac: export OPENROUTER_API_KEY=your_key_here")
+        print("   Windows: set GEMINI_API_KEY=your_key_here")
+        print("   Linux/Mac: export GEMINI_API_KEY=your_key_here")
         print("\nOr add it to your system environment variables permanently.")
         
         # Offer to set it temporarily
         key_input = input("\nEnter your API key now (or press Enter to skip): ").strip()
         if key_input:
-            os.environ['OPENROUTER_API_KEY'] = key_input
+            os.environ['GEMINI_API_KEY'] = key_input
             print("✅ API key set for this session")
         else:
             print("⚠️  You'll need to set the API key before running the assistant")
@@ -102,7 +102,7 @@ def run_tests():
         if config.validate_api_key():
             print("✅ API key validation passed")
         else:
-            print("⚠️  API key validation failed - set OPENROUTER_API_KEY")
+            print("⚠️  API key validation failed - set GEMINI_API_KEY")
         
         # Test code executor
         print("Testing code executor...")

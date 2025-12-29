@@ -356,7 +356,7 @@ def main():
     try:
         # Validate configuration
         if not config.validate_api_key():
-            print("❌ Please set your OPENROUTER_API_KEY environment variable")
+            print("❌ Please set your GEMINI_API_KEY environment variable")
             return 1
         
         # Start the assistant

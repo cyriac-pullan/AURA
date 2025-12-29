@@ -52,9 +52,9 @@ class Config:
         """Load configuration from file or create default"""
         default_config = {
             "api": {
-                "provider": "openrouter",
-                "model": "google/gemini-2.0-flash-001",
-                "base_url": "https://openrouter.ai/api/v1"
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "base_url": None  # Not needed for Gemini direct API
             },
             "security": {
                 "allowed_modules": [],  # Empty list = allow all modules
@@ -79,9 +79,15 @@ class Config:
         if self.config_file.exists():
             try:
                 with open(self.config_file, 'r') as f:
-                    config = json.load(f)
+                    saved_config = json.load(f)
                 # Merge with defaults for any missing keys
-                return {**default_config, **config}
+                merged_config = {**default_config, **saved_config}
+                # Force update model to latest default if it's an old OpenRouter format
+                if merged_config.get('api', {}).get('model', '').startswith('google/') or merged_config.get('api', {}).get('model') == 'google/gemini-2.0-flash-001':
+                    merged_config['api']['model'] = default_config['api']['model']
+                    merged_config['api']['provider'] = default_config['api']['provider']
+                    self._save_config(merged_config)  # Save the updated config
+                return merged_config
             except Exception as e:
                 logging.error(f"Error loading config: {e}")
                 return default_config
@@ -149,17 +155,25 @@ class Config:
     @property
     def api_key(self) -> Optional[str]:
         """Get API key from environment variable"""
-        return os.getenv('OPENROUTER_API_KEY') or os.getenv('OPENAI_API_KEY')
+        return os.getenv('GEMINI_API_KEY') or os.getenv('OPENROUTER_API_KEY') or os.getenv('OPENAI_API_KEY')
     
     def validate_api_key(self) -> bool:
         """Validate that API key is available"""
         key = self.api_key
         if not key:
-            logging.error("No API key found. Please set OPENROUTER_API_KEY environment variable.")
+            logging.error("No API key found. Please set GEMINI_API_KEY environment variable.")
+            print("❌ ERROR: No API key found.")
+            print("   Please set GEMINI_API_KEY in your .env file")
+            print("   Get your key from: https://aistudio.google.com/app/apikey")
             return False
         if len(key) < 20:  # Basic validation
             logging.error("API key appears to be invalid (too short).")
+            print("❌ ERROR: API key appears to be invalid (too short).")
+            print("   Please check your GEMINI_API_KEY in .env file")
             return False
+        # Check if key starts with expected prefix for Gemini
+        if not key.startswith('AIza'):
+            logging.warning("API key format may be incorrect (expected 'AIza' prefix for Gemini API key)")
         return True
 
 # Global config instance
