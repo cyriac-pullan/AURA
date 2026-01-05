@@ -60,14 +60,18 @@ def hide_desktop_icons() -> bool:
 
 # Initialize pycaw volume control
 try:
-    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-    from ctypes import cast, POINTER
-    from comtypes import CLSCTX_ALL
+    # Use the high-level AudioUtilities + AudioDevice API provided by pycaw.
+    # In current pycaw versions, AudioUtilities.GetSpeakers() returns an
+    # AudioDevice wrapper whose EndpointVolume property exposes the
+    # IAudioEndpointVolume COM interface.
+    from pycaw.pycaw import AudioUtilities
 
-    # Get default audio device
-    devices = AudioUtilities.GetSpeakers()
-    interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-    volume_control = cast(interface, POINTER(IAudioEndpointVolume))
+    # Get default speakers device and its endpoint volume interface
+    speakers = AudioUtilities.GetSpeakers()
+    if speakers is None:
+        raise RuntimeError("No default speakers device found")
+
+    volume_control = speakers.EndpointVolume
     PYCAW_AVAILABLE = True
     print("pycaw volume control initialized")
 except ImportError:
