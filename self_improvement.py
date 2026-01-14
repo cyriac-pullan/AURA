@@ -69,6 +69,14 @@ class SelfImprovementEngine:
             'pyttsx3': 'pyttsx3',
             'pyaudio': 'pyaudio',
             'pydub': 'pydub',
+            'pyaudio-utils': 'pyaudio-utils',
+            'pyaudio-devices': 'pyaudio-devices',
+            'pyaudio-utils': 'pyaudio-utils',
+            'pyaudio-devices': 'pyaudio-devices',
+            'pycaw': 'pycaw',
+            'comtypes': 'comtypes',
+            'pywin32': 'pywin32',
+            'wmi': 'wmi',
             # Network and Security
             'cryptography': 'cryptography',
             # Date and Time
