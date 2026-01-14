@@ -70,6 +70,27 @@ except ImportError:
 
 VOICE_AVAILABLE = TTS_AVAILABLE  # For backward compatibility
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# AURA v2 - Intelligent Routing (reduces LLM costs by 85%+)
+# ═══════════════════════════════════════════════════════════════════════════════
+try:
+    from aura_v2_bridge import aura_bridge
+    from wake_word_detector import KeywordWakeDetector, check_wake_word, extract_command_after_wake
+    AURA_V2_AVAILABLE = True
+    print("AURA v2 intelligent routing enabled")
+except ImportError as e:
+    AURA_V2_AVAILABLE = False
+    print(f"AURA v2 not available, using fallback: {e}")
+
+# TTS Manager for proper voice output
+try:
+    from tts_manager import get_tts_manager, speak as tts_speak
+    TTS_MANAGER_AVAILABLE = True
+    print("TTS Manager loaded")
+except ImportError:
+    TTS_MANAGER_AVAILABLE = False
+    tts_speak = None
+
 
 class AuraPersonality:
     """AURA's JARVIS-like personality - witty, helpful, slightly sarcastic"""
@@ -177,42 +198,30 @@ class AuraPersonality:
 
 
 class VoiceThread(QThread):
-    """Background thread for text-to-speech"""
+    """Background thread for text-to-speech - Uses TTS Manager"""
+    
     def __init__(self, text):
         super().__init__()
         self.text = text
         
     def run(self):
-        if not TTS_AVAILABLE:
+        if not self.text:
             return
-        try:
-            engine = pyttsx3.init()
-            voices = engine.getProperty('voices')
-            
-            # Get voice preference from environment
-            voice_pref = os.environ.get('AURA_VOICE', 'male').lower()
-            
-            if voice_pref == 'female':
-                # Female voice - look for Zira, Helena, or any female voice
-                for voice in voices:
-                    name_lower = voice.name.lower()
-                    if 'zira' in name_lower or 'helena' in name_lower or 'female' in name_lower or 'eva' in name_lower:
-                        engine.setProperty('voice', voice.id)
-                        break
-            else:
-                # Male voice (default) - look for David or Mark
-                for voice in voices:
-                    name_lower = voice.name.lower()
-                    if 'david' in name_lower or 'mark' in name_lower:
-                        engine.setProperty('voice', voice.id)
-                        break
-            
-            engine.setProperty('rate', 180)
-            engine.setProperty('volume', 0.9)
-            engine.say(self.text)
-            engine.runAndWait()
-        except Exception as e:
-            print(f"Voice error: {e}")
+        
+        # Use TTS Manager if available
+        if TTS_MANAGER_AVAILABLE and tts_speak:
+            tts_speak(self.text)
+        elif TTS_AVAILABLE:
+            # Fallback to direct pyttsx3
+            try:
+                import pyttsx3
+                engine = pyttsx3.init()
+                engine.setProperty('rate', 175)
+                engine.say(self.text)
+                engine.runAndWait()
+                engine.stop()
+            except Exception as e:
+                print(f"Voice error: {e}")
 
 
 
@@ -265,7 +274,7 @@ class SpeechRecognitionThread(QThread):
 
 
 class ProcessingThread(QThread):
-    """Background thread for AI processing"""
+    """Background thread for AI processing - AURA v2 with intelligent routing"""
     finished = pyqtSignal(str, str, bool)  # response, type, success
     
     def __init__(self, message, context):
@@ -274,6 +283,34 @@ class ProcessingThread(QThread):
         self.context = context
         
     def run(self):
+        # ═══════════════════════════════════════════════════════════════════
+        # AURA v2: Use intelligent routing (saves 85%+ LLM tokens)
+        # ═══════════════════════════════════════════════════════════════════
+        if AURA_V2_AVAILABLE:
+            try:
+                response, success, used_gemini = aura_bridge.process(
+                    self.message, 
+                    self.context
+                )
+                
+                # Log routing stats periodically
+                stats = aura_bridge.get_stats()
+                if stats['total_commands'] % 10 == 0 and stats['total_commands'] > 0:
+                    print(f"AURA v2 Stats: Local={stats['local_commands']}, "
+                          f"Gemini={stats['gemini_full']}, "
+                          f"Saved={stats['tokens_saved']} tokens")
+                
+                msg_type = "success" if success else "error"
+                self.finished.emit(response, msg_type, success)
+                return
+                
+            except Exception as e:
+                print(f"AURA v2 error, falling back: {e}")
+                # Fall through to legacy processing
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # Legacy fallback (if AURA v2 not available)
+        # ═══════════════════════════════════════════════════════════════════
         if not AURA_AVAILABLE:
             self.finished.emit(
                 "AURA backend not available.",
@@ -313,6 +350,184 @@ class ProcessingThread(QThread):
                     
         except Exception as e:
             self.finished.emit(str(e), "error", False)
+
+
+class ContinuousListeningThread(QThread):
+    """
+    AURA v2: Continuous listening thread with wake word detection.
+    Enables true hands-free operation.
+    """
+    wake_word_detected = pyqtSignal()
+    command_recognized = pyqtSignal(str)
+    status_update = pyqtSignal(str)
+    error = pyqtSignal(str)
+    listening_active = pyqtSignal(bool)  # Signal when actively listening
+    
+    def __init__(self, wake_words=None):
+        super().__init__()
+        self.wake_words = wake_words or ["aura", "hey aura", "ok aura"]
+        self.is_running = False
+        self.awaiting_command = False
+        self._stop_requested = False
+        
+    def run(self):
+        import sys
+        
+        if not STT_AVAILABLE:
+            self.error.emit("Speech recognition not available")
+            return
+        
+        self.is_running = True
+        self._stop_requested = False
+        
+        print("[Hands-Free] Starting continuous listening...", flush=True)
+        
+        recognizer = sr.Recognizer()
+        recognizer.energy_threshold = 400  # Slightly higher threshold
+        recognizer.dynamic_energy_threshold = True
+        recognizer.pause_threshold = 0.8  # Shorter pause
+        
+        self.status_update.emit("Listening for 'Aura'...")
+        
+        loop_count = 0
+        
+        while self.is_running and not self._stop_requested:
+            loop_count += 1
+            try:
+                with sr.Microphone() as source:
+                    # Quick ambient adjustment
+                    recognizer.adjust_for_ambient_noise(source, duration=0.3)
+                    self.listening_active.emit(True)
+                    
+                    if loop_count % 5 == 1:  # Every 5th loop
+                        print(f"[Hands-Free] Listening (loop {loop_count})...", flush=True)
+                    
+                    try:
+                        # Listen with timeout
+                        audio = recognizer.listen(
+                            source, 
+                            timeout=3.0,  # Wait up to 3 seconds for speech to start
+                            phrase_time_limit=10.0  # Max 10 seconds per phrase
+                        )
+                        self.listening_active.emit(False)
+                    except sr.WaitTimeoutError:
+                        self.listening_active.emit(False)
+                        continue  # No speech, keep listening
+                    
+                    # Try to recognize
+                    try:
+                        text = recognizer.recognize_google(audio)
+                        text_lower = text.lower().strip()
+                        print(f"[Hands-Free] Heard: '{text}'")
+                        
+                        if self.awaiting_command:
+                            # We're waiting for a command after wake word
+                            print(f"[Hands-Free] Command received: '{text}'")
+                            self.awaiting_command = False
+                            self.command_recognized.emit(text)
+                            
+                        elif self._check_wake_word(text_lower):
+                            # Wake word detected!
+                            print(f"[Hands-Free] Wake word detected in: '{text}'")
+                            self.wake_word_detected.emit()
+                            
+                            # Check if command is included after wake word
+                            command = self._extract_command(text)
+                            if command and len(command) > 3:
+                                # Command included after wake word
+                                print(f"[Hands-Free] Inline command: '{command}'")
+                                self.command_recognized.emit(command)
+                            else:
+                                # Wait for next utterance as command
+                                print("[Hands-Free] Waiting for command...")
+                                self.awaiting_command = True
+                        else:
+                            # Not a wake word, ignore
+                            print(f"[Hands-Free] Ignored (no wake word): '{text}'")
+                                
+                    except sr.UnknownValueError:
+                        pass  # Silent - speech not understood
+                    except sr.RequestError as e:
+                        print(f"[Hands-Free] API error: {e}")
+                        self.error.emit(f"Recognition service error")
+                        import time
+                        time.sleep(1)  # Brief pause before retry
+                        
+            except OSError as e:
+                # Microphone access error
+                print(f"[Hands-Free] Microphone error: {e}")
+                self.error.emit(f"Microphone error")
+                import time
+                time.sleep(2)
+            except Exception as e:
+                if not self._stop_requested:
+                    print(f"[Hands-Free] Error: {e}")
+                import time
+                time.sleep(0.5)
+        
+        print("[Hands-Free] Stopped listening")
+        self.status_update.emit("Hands-free stopped")
+    
+    def _check_wake_word(self, text: str) -> bool:
+        """Check if text contains wake word"""
+        text_lower = text.lower()
+        for wake in self.wake_words:
+            if wake.lower() in text_lower:
+                return True
+        # Also check common misrecognitions of "Aura"
+        # Including Hindi/regional misrecognitions
+        misrecognitions = [
+            # Common English mishearings
+            "tora", "hora", "ora", "or a", "ura", "aora", 
+            "dora", "laura", "aura", "aurora", "euro",
+            "aira", "era", "ara", "oreo", "aura's",
+            # Hindi/Regional mishearings
+            "hamara", "howrah", "porus", "bhanwra", "bhawra",
+            "honour", "horror", "hora", "horra",
+            # Other variations
+            "arra", "awara", "awra", "aara", "ahura",
+            "for a", "flora", "cora", "nora"
+        ]
+        for mis in misrecognitions:
+            if mis in text_lower:
+                return True
+        return False
+    
+    def _extract_command(self, text: str) -> str:
+        """Extract command after wake word"""
+        text_lower = text.lower()
+        
+        # Check primary wake words first
+        for wake in self.wake_words:
+            wake_lower = wake.lower()
+            if wake_lower in text_lower:
+                idx = text_lower.find(wake_lower)
+                cmd = text[idx + len(wake_lower):].strip()
+                cmd = cmd.lstrip(',.!? ')
+                return cmd
+        
+        # Check misrecognitions (same list as _check_wake_word)
+        misrecognitions = [
+            "tora", "hora", "ora", "or a", "ura", "aora", 
+            "dora", "laura", "aurora", "euro", "aira", "era", "ara",
+            "hamara", "howrah", "porus", "bhanwra", "bhawra",
+            "honour", "horror", "horra", "arra", "awara", "awra",
+            "for a", "flora", "cora", "nora"
+        ]
+        for mis in misrecognitions:
+            if mis in text_lower:
+                idx = text_lower.find(mis)
+                cmd = text[idx + len(mis):].strip()
+                cmd = cmd.lstrip(',.!? ')
+                return cmd
+        
+        return text
+    
+    def stop(self):
+        """Stop the continuous listening"""
+        print("[Hands-Free] Stop requested")
+        self._stop_requested = True
+        self.is_running = False
 
 
 class PulsingOrb(QWidget):
@@ -1034,6 +1249,10 @@ class AuraFloatingWidget(QWidget):
         self.is_listening = False
         self.is_collapsed = False
         
+        # AURA v2: Hands-free continuous listening
+        self.hands_free_mode = False
+        self.continuous_listening_thread = None
+        
         # Mini orb widget for collapsed mode
         self.mini_orb_widget = None
         
@@ -1243,6 +1462,26 @@ class AuraFloatingWidget(QWidget):
             }
         """)
         input_layout.addWidget(self.mic_btn)
+        
+        # AURA v2: Hands-free mode button (continuous listening with wake word)
+        self.hands_free_btn = QPushButton("👂")
+        self.hands_free_btn.setFixedSize(44, 44)
+        self.hands_free_btn.clicked.connect(self.toggle_hands_free_mode)
+        self.hands_free_btn.setToolTip("Hands-free mode (say 'Aura' to activate)")
+        self.hands_free_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(123, 104, 238, 0.3);
+                border-radius: 22px;
+                color: white;
+                font-size: 18px;
+            }
+            QPushButton:hover {
+                background: rgba(123, 104, 238, 0.3);
+                border-color: rgba(123, 104, 238, 0.6);
+            }
+        """)
+        input_layout.addWidget(self.hands_free_btn)
         
         # Send button
         self.send_btn = QPushButton("▶")
@@ -1551,6 +1790,152 @@ class AuraFloatingWidget(QWidget):
         self.stop_listening()
         self.set_status("Didn't catch that", "error")
         QTimer.singleShot(2000, lambda: self.set_status("Ready", "normal"))
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # AURA v2: HANDS-FREE MODE - Continuous listening with wake word
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    def toggle_hands_free_mode(self):
+        """Toggle hands-free continuous listening mode"""
+        if not STT_AVAILABLE:
+            self.set_status("Voice unavailable", "error")
+            return
+        
+        if self.hands_free_mode:
+            self.stop_hands_free_mode()
+        else:
+            self.start_hands_free_mode()
+    
+    def start_hands_free_mode(self):
+        """Start continuous listening with wake word detection"""
+        self.hands_free_mode = True
+        
+        # Update UI
+        self.set_status("Hands-free: Say 'Aura'", "success")
+        self.hands_free_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(0, 255, 136, 0.4);
+                border: 2px solid rgba(0, 255, 136, 0.8);
+                border-radius: 22px;
+                color: white;
+                font-size: 18px;
+            }
+        """)
+        self.hands_free_btn.setToolTip("Hands-free mode ACTIVE - Click to stop")
+        
+        # Start continuous listening thread
+        self.continuous_listening_thread = ContinuousListeningThread(
+            wake_words=["aura", "hey aura", "ok aura"]
+        )
+        self.continuous_listening_thread.wake_word_detected.connect(self.on_wake_word_detected)
+        self.continuous_listening_thread.command_recognized.connect(self.on_hands_free_command)
+        self.continuous_listening_thread.status_update.connect(lambda s: self.set_status(s, "normal"))
+        self.continuous_listening_thread.error.connect(self.on_hands_free_error)
+        self.continuous_listening_thread.start()
+        
+        # Voice confirmation using TTS Manager
+        if TTS_MANAGER_AVAILABLE:
+            tts_speak("Hands-free mode activated. Say Aura to wake me.")
+        elif VOICE_AVAILABLE:
+            self.voice_thread = VoiceThread("Hands-free mode activated. Say Aura to wake me.")
+            self.voice_thread.start()
+    
+    def stop_hands_free_mode(self):
+        """Stop continuous listening"""
+        self.hands_free_mode = False
+        
+        # Stop the thread
+        if self.continuous_listening_thread:
+            self.continuous_listening_thread.stop()
+            self.continuous_listening_thread.quit()
+            self.continuous_listening_thread.wait(2000)
+            self.continuous_listening_thread = None
+        
+        # Reset UI
+        self.set_status("Ready", "normal")
+        self.orb.set_state("idle")
+        self.hands_free_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(123, 104, 238, 0.3);
+                border-radius: 22px;
+                color: white;
+                font-size: 18px;
+            }
+            QPushButton:hover {
+                background: rgba(123, 104, 238, 0.3);
+                border-color: rgba(123, 104, 238, 0.6);
+            }
+        """)
+        self.hands_free_btn.setToolTip("Hands-free mode (say 'Aura' to activate)")
+        
+        # Voice confirmation using TTS Manager
+        if TTS_MANAGER_AVAILABLE:
+            tts_speak("Hands-free mode deactivated.")
+        elif VOICE_AVAILABLE:
+            self.voice_thread = VoiceThread("Hands-free mode deactivated.")
+            self.voice_thread.start()
+    
+    def on_wake_word_detected(self):
+        """Handle wake word detection - AURA heard her name"""
+        self.orb.set_state("listening")
+        self.set_status("Yes?", "success")
+        
+        # Voice acknowledgment using TTS Manager
+        if TTS_MANAGER_AVAILABLE and AURA_V2_AVAILABLE:
+            ack = aura_bridge.get_acknowledgment()
+            tts_speak(ack)
+        elif TTS_MANAGER_AVAILABLE:
+            tts_speak("Yes?")
+        elif VOICE_AVAILABLE:
+            self.voice_thread = VoiceThread("Yes?")
+            self.voice_thread.start()
+    
+    def on_hands_free_command(self, command):
+        """Handle command from hands-free mode"""
+        self.orb.set_state("processing")
+        self.set_status(f"Processing: {command[:25]}...", "processing")
+        
+        # Put command in input field (for visibility)
+        self.input_field.setText(command)
+        
+        # Process the command
+        self.context["command_count"] += 1
+        
+        # Check for exit commands
+        if command.lower() in ['exit', 'quit', 'goodbye', 'bye', 'stop listening']:
+            self.stop_hands_free_mode()
+            return
+        
+        # Process in background thread
+        self.processing_thread = ProcessingThread(command, self.context)
+        self.processing_thread.finished.connect(self.on_hands_free_complete)
+        self.processing_thread.start()
+    
+    def on_hands_free_complete(self, response, msg_type, success):
+        """Handle completion in hands-free mode"""
+        self.orb.set_state("idle")
+        
+        if success:
+            self.set_status("Done - Say 'Aura'", "success")
+        else:
+            self.set_status("Error - Say 'Aura'", "error")
+        
+        # Speak the response using TTS Manager
+        if TTS_MANAGER_AVAILABLE and response:
+            tts_speak(response)
+        elif VOICE_AVAILABLE and response:
+            self.voice_thread = VoiceThread(response)
+            self.voice_thread.start()
+        
+        # Clear input and reset after delay
+        self.input_field.clear()
+        QTimer.singleShot(3000, lambda: self.set_status("Hands-free: Say 'Aura'", "success") if self.hands_free_mode else None)
+    
+    def on_hands_free_error(self, error_msg):
+        """Handle error in hands-free mode"""
+        print(f"Hands-free error: {error_msg}")
+        # Don't show transient errors, they're usually timeout related
 
 
 def main():

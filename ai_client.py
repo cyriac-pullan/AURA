@@ -549,7 +549,7 @@ import re
 
 # Extract brightness level from command
 command = "set brightness to 34"
-brightness_match = re.search(r'(\d+)', command)
+brightness_match = re.search(r'(\\d+)', command)
 if brightness_match:
     brightness_level = int(brightness_match.group(1))
     result = set_brightness(brightness_level)
@@ -559,7 +559,7 @@ else:
 
 # Extract volume level from command  
 command = "set volume to 50"
-volume_match = re.search(r'(\d+)', command)
+volume_match = re.search(r'(\\d+)', command)
 if volume_match:
     volume_level = int(volume_match.group(1))
     result = set_system_volume(volume_level)

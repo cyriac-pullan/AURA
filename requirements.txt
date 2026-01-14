@@ -10,3 +10,12 @@ comtypes>=1.1.14
 pycaw>=20230407
 google-generativeai>=0.8.0
 google-genai>=0.2.0
+
+# AURA v2 Dependencies
+rapidfuzz>=3.0.0           # Fuzzy string matching for intent routing
+PyQt5>=5.15.0              # Widget UI
+
+# Optional: Offline voice (install manually if needed)
+# vosk>=0.3.45             # Offline speech recognition
+# openwakeword>=0.5.0      # Offline wake word detection
+# pyaudio>=0.2.14          # Audio input
